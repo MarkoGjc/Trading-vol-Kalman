@@ -76,8 +76,12 @@ def get_candles(symbol: str = "BTCUSDT",
 
     os.makedirs(output_dir, exist_ok=True)
 
-    output_file = os.path.join(output_dir, f"{symbol}_{interval}_{days_back}d.csv")
-    
+    # create per-symbol subdirectory inside output_dir
+    symbol_dir = os.path.join(output_dir, symbol)
+    os.makedirs(symbol_dir, exist_ok=True)
+
+    output_file = os.path.join(symbol_dir, f"{symbol}_{interval}_{days_back}d.csv")
+
     df.to_csv(output_file, index=True)
     print(f"✅  Fichier créé :  {output_file}   ({len(df):,} lignes)")
 
@@ -87,7 +91,7 @@ def get_candles(symbol: str = "BTCUSDT",
 
 # -------------------------------------------------------------
 if __name__ == "__main__":
-    symbol    = "BTCUSDT"
+    symbol    = "ETHUSDT"
     interval  = "1M"
     days_back = 400
     print(f"⏬  {symbol} | {interval} | {days_back} jours …")
