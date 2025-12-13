@@ -10,19 +10,22 @@ from typing import Optional
 
 
 # -------------------------------------------------------------
-def fetch_chunk(symbol: str, start_ms: int, interval: str, limit: int):
+def fetch_chunk(symbol: str, start_ms: int, interval: str, limit: int,market_type: str):
     params = dict(symbol=symbol, interval=interval,
                   startTime=start_ms, limit=limit)
-    API_URL   = "https://api.binance.com/api/v3/klines"
+    if market_type == "Futures":
+        API_URL   = "https://fapi.binance.com/fapi/v1/klines"
+    if market_type == "Spot":
+        API_URL   = "https://api.binance.com/api/v3/klines"
     return requests.get(API_URL, params=params, timeout=10).json()
 
 
 def download(symbol: str, start_dt: datetime, end_dt: datetime,
-             interval: str, limit, sleep: float) -> pd.DataFrame:
+             interval: str, limit, sleep: float, market_type: str) -> pd.DataFrame:
     PARIS_TZ  = ZoneInfo("Europe/Paris")
     rows, cur = [], start_dt
     while cur < end_dt:
-        batch = fetch_chunk(symbol, int(cur.timestamp() * 1000), interval=interval, limit=limit)
+        batch = fetch_chunk(symbol, int(cur.timestamp() * 1000), interval=interval, limit=limit, market_type=market_type)
         if not batch:
             break
         rows.extend(batch)
@@ -54,7 +57,8 @@ def download(symbol: str, start_dt: datetime, end_dt: datetime,
 
 def get_candles(symbol: str = "BTCUSDT",
                 days_back: int = 50,
-                interval: str = "1m") -> pd.DataFrame:
+                interval: str = "1m",
+                market_type = "Spot") -> pd.DataFrame:
     """Télécharge les chandelles (1m par défaut) et optionnellement sauvegarde en CSV.
 
     Usage simple :
@@ -63,10 +67,12 @@ def get_candles(symbol: str = "BTCUSDT",
     limit = 1000
     sleep = 0.12
     output_dir  = os.path.join(os.getcwd(), "output")
+    # normalize market_type and prepare market-specific folder
+    market_type = str(market_type).capitalize()
     end_utc = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     start_utc = end_utc - timedelta(days=days_back)
 
-    df = download(symbol, start_utc, end_utc, interval=interval, limit=limit, sleep=sleep)
+    df = download(symbol, start_utc, end_utc, interval=interval, limit=limit, sleep=sleep, market_type=market_type)
 
     # Rename the 'timestamp' column to 'Time' and set as index
     columns = {"timestamp": "Time", "open": "Open", "high": "High",
@@ -76,8 +82,12 @@ def get_candles(symbol: str = "BTCUSDT",
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # create per-symbol subdirectory inside output_dir
-    symbol_dir = os.path.join(output_dir, symbol)
+    # create market-type subdirectory (Spot or Futures)
+    market_dir = os.path.join(output_dir, market_type)
+    os.makedirs(market_dir, exist_ok=True)
+
+    # create per-symbol subdirectory inside market_dir
+    symbol_dir = os.path.join(market_dir, symbol)
     os.makedirs(symbol_dir, exist_ok=True)
 
     output_file = os.path.join(symbol_dir, f"{symbol}_{interval}_{days_back}d.csv")
@@ -91,12 +101,13 @@ def get_candles(symbol: str = "BTCUSDT",
 
 # -------------------------------------------------------------
 if __name__ == "__main__":
-    symbol    = "ETHUSDT"
-    interval  = "1M"
-    days_back = 400
+    symbol    = "BTCUSDT"
+    interval  = "1m"
+    days_back = 10
+    market_type = "Futures"
     print(f"⏬  {symbol} | {interval} | {days_back} jours …")
     try:
-        get_candles(symbol, days_back, interval)
+        get_candles(symbol, days_back, interval, market_type)
     except Exception as e:
         print("❌  Erreur :", e, file=sys.stderr)
         sys.exit(1)
