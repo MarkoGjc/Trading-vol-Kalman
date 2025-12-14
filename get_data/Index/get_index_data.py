@@ -82,10 +82,36 @@ def fetch_and_save_index_data(
 
     data = pd.concat(dfs).sort_index()
     data = data[~data.index.duplicated(keep="last")]
-    data.insert(0, "Ticker", ticker)
+
+    # Remove 'Adj Close' if present
+    if "Adj Close" in data.columns:
+        data = data.drop(columns=["Adj Close"])
+
+    # Convert index (datetime) to formatted Time column: DD/MM/YYYY  HH:MM:SS
+    idx = pd.to_datetime(data.index)
+    # If timezone-naive, assume UTC; otherwise convert to UTC for consistent formatting
+    try:
+        if idx.tz is None:
+            idx = idx.tz_localize(timezone.utc)
+        else:
+            idx = idx.tz_convert(timezone.utc)
+    except Exception:
+        # fallback: ignore timezone operations
+        idx = pd.to_datetime(data.index)
+
+    time_str = idx.strftime("%d/%m/%Y  %H:%M:%S")
+    data = data.copy()
+    data.insert(0, "Time", time_str)
+
+    # Keep only the requested columns in order
+    wanted = ["Time", "Open", "High", "Low", "Close", "Volume"]
+    available = [c for c in wanted if c in data.columns]
+    data = data[available]
 
     base_dir = Path(base_dir)
-    ticker_dir = base_dir / _safe_filename(ticker)
+    # ensure an 'output' folder inside the Index folder, then per-ticker subfolder
+    output_base = base_dir / "output"
+    ticker_dir = output_base / _safe_filename(ticker)
     ticker_dir.mkdir(parents=True, exist_ok=True)
 
     start_str = start.strftime("%Y%m%d")
@@ -93,7 +119,10 @@ def fetch_and_save_index_data(
     fname = _safe_filename(f"{ticker}_{freq}_{req_days}d_{start_str}-{end_str}.csv")
 
     out_path = ticker_dir / fname
-    data.to_csv(out_path, index=True)
+
+    data.columns = data.columns.droplevel(1)
+    print(data)
+    data.to_csv(out_path, index=False)
 
 
 
