@@ -101,6 +101,14 @@ def get_candles(symbol: str = "BTCUSDT",
 
 # -------------------------------------------------------------
 if __name__ == "__main__":
+
+    binance_symbols = [
+    "BTCUSDT",
+    "ETHUSDT"]
+    yf_max_days_by_interval = {"1m": 50,"2m": 400,"5m": 400,"15m": 400,"30m": 400,"60m": 700,   
+                               "1h": 700,"90m": 700,"1d": 1000,"5d": 1000,"1wk": 1000,
+                               "1mo": 1000,"3mo": 1000}
+
     symbol    = "BTCUSDT"
     interval  = "1m"
     days_back = 10
