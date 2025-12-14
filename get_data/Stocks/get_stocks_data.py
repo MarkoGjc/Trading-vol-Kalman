@@ -120,10 +120,7 @@ def fetch_and_save_index_data(
     data.columns = data.columns.droplevel(1)
     data.to_csv(out_path, index=False)
 
-
-
-# --- Exemples ---
-if __name__ == "__main__":
+def main_stocks():
 
     stock_tickers = [
     "V", "MA",
@@ -153,3 +150,9 @@ if __name__ == "__main__":
     # fetch_and_save_index_data("AAPL", "1d", 5000)
     # fetch_and_save_index_data("AAPL", "15m", 60)
     # fetch_and_save_index_data("AAPL", "1h", 500)
+
+
+
+if __name__ == "__main__":
+
+    main_stocks()

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo               # stdlib Py ≥ 3.9
 import os
 from typing import Optional
+import os
 
 
 
@@ -98,10 +99,8 @@ def get_candles(symbol: str = "BTCUSDT",
 
     return df
 
-
-# -------------------------------------------------------------
-if __name__ == "__main__":
-
+def main_crypto():
+    os.chdir(r"C:\Users\Gajic\OneDrive - Université Paris-Dauphine\Trading\Trading-vol-Kalman\get_data\Crypto")
     binance_symbols = [
     "BTCUSDT",
     "ETHUSDT"]
@@ -117,6 +116,7 @@ if __name__ == "__main__":
                 try:
                     get_candles(symbol, days_back, interval, market_type)
                 except Exception as e:
+                    
                     print(f"❌  Erreur pour {symbol} | {interval} | {days_back} jours | {market_type} : {e}")
 
     # #TEST
@@ -130,3 +130,9 @@ if __name__ == "__main__":
     # except Exception as e:
     #     print("❌  Erreur :", e, file=sys.stderr)
     #     sys.exit(1)
+# -------------------------------------------------------------
+
+
+if __name__ == "__main__":
+
+    main_crypto()

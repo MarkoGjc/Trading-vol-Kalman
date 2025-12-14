@@ -123,25 +123,24 @@ def fetch_and_save_index_data(
     data.to_csv(out_path, index=False)
 
 
-
-# --- Exemples ---
-if __name__ == "__main__":
+def main_index():
 
     index_tickers = [
-        "^GSPC",       # S&P 500
-        "^NDX",        # Nasdaq 100 (si indispo chez toi, remplace par QQQ)
-        "^DJI",        # Dow Jones
-        "^RUT",        # Russell 2000
-        "^GDAXI",      # DAX
-        "^STOXX50E",   # Euro Stoxx 50
-        "^FTSE",       # FTSE 100
-        "^N225",       # Nikkei 225
+        "SPY",  # S&P 500
+        "QQQ",  # Nasdaq 100
+        "DIA",  # Dow Jones
+        "IWM",  # Russell 2000
+
+        "EWG",  # Allemagne (proxy DAX)
+        "FEZ",  # Euro Stoxx 50
+        "EWU",  # UK (proxy FTSE 100)
+        "EWJ",  # Japon (proxy Nikkei/Topix)
     ]
 
     yf_max_days_by_interval = {"1m": 7,"2m": 60,"5m": 60,"15m": 60,"30m": 60,"60m": 700,   
-                              "1h": 700,"90m": 60,"1d": 1000,"5d": 1000,"1wk": 1000,
-                              "1mo": 1000,"3mo": 1000}
-    
+                                "1h": 700,"90m": 60,"1d": 1000,"5d": 1000,"1wk": 1000,
+                                "1mo": 1000,"3mo": 1000}
+
     for ticker in index_tickers:
         for freq, day_back in yf_max_days_by_interval.items():
             print(f"⏬  {ticker} | {freq} | {day_back} jours …")
@@ -154,3 +153,9 @@ if __name__ == "__main__":
     # fetch_and_save_index_data("EURUSD=X", "1d", 5000)
     # fetch_and_save_index_data("SPY", "15m", 60)
     # fetch_and_save_index_data("SPY", "1h", 500)
+
+
+
+if __name__ == "__main__":
+
+    main_index()

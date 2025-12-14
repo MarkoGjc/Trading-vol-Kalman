@@ -121,10 +121,7 @@ def fetch_and_save_index_data(
     data.columns = data.columns.droplevel(1)
     data.to_csv(out_path, index=False)
 
-
-
-# --- Exemples ---
-if __name__ == "__main__":
+def main_forex():
 
     fx_tickers = ["EURUSD=X","GBPUSD=X","AUDUSD=X","NZDUSD=X","USDJPY=X",
                   "EURJPY=X","EURGBP=X","AUDNZD=X",]
@@ -146,3 +143,9 @@ if __name__ == "__main__":
     # fetch_and_save_index_data("EURUSD=X", "1d", 5000)
     # fetch_and_save_index_data("SPY", "15m", 60)
     # fetch_and_save_index_data("SPY", "1h", 500)
+
+
+# --- Exemples ---
+if __name__ == "__main__":
+
+    main_forex()
