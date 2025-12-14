@@ -139,7 +139,17 @@ if __name__ == "__main__":
     yf_max_days_by_interval = {"1m": 7,"2m": 60,"5m": 60,"15m": 60,"30m": 60,"60m": 700,   
                                "1h": 700,"90m": 60,"1d": 1000,"5d": 1000,"1wk": 1000,
                                "1mo": 1000,"3mo": 1000}
+    
+    for ticker in stock_tickers:
+        for freq, day_back in yf_max_days_by_interval.items():
+            print(f"⏬  {ticker} | {freq} | {day_back} jours …")
+            try:
+                fetch_and_save_index_data(ticker, freq, day_back)
+            except Exception as e:
+                print(f"❌  Erreur pour {ticker} | {freq} | {day_back} jours : {e}")
 
-    fetch_and_save_index_data("AAPL", "1d", 5000)
-    fetch_and_save_index_data("AAPL", "15m", 60)
-    fetch_and_save_index_data("AAPL", "1h", 500)
+
+    # #TESTS
+    # fetch_and_save_index_data("AAPL", "1d", 5000)
+    # fetch_and_save_index_data("AAPL", "15m", 60)
+    # fetch_and_save_index_data("AAPL", "1h", 500)

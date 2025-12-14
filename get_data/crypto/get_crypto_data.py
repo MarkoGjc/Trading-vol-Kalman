@@ -108,14 +108,25 @@ if __name__ == "__main__":
     yf_max_days_by_interval = {"1m": 50,"2m": 400,"5m": 400,"15m": 400,"30m": 400,"60m": 700,   
                                "1h": 700,"90m": 700,"1d": 1000,"5d": 1000,"1wk": 1000,
                                "1mo": 1000,"3mo": 1000}
+    market_types = ["Futures","Spot"]
 
-    symbol    = "BTCUSDT"
-    interval  = "1m"
-    days_back = 10
-    market_type = "Futures"
-    print(f"⏬  {symbol} | {interval} | {days_back} jours …")
-    try:
-        get_candles(symbol, days_back, interval, market_type)
-    except Exception as e:
-        print("❌  Erreur :", e, file=sys.stderr)
-        sys.exit(1)
+    for market_type in market_types:
+        for symbol in binance_symbols:
+            for interval, days_back in yf_max_days_by_interval.items():
+                print(f"⏬  {symbol} | {interval} | {days_back} jours | {market_type} …")
+                try:
+                    get_candles(symbol, days_back, interval, market_type)
+                except Exception as e:
+                    print(f"❌  Erreur pour {symbol} | {interval} | {days_back} jours | {market_type} : {e}")
+
+    # #TEST
+    # symbol    = "BTCUSDT"
+    # interval  = "1m"
+    # days_back = 10
+    # market_type = "Futures"
+    # print(f"⏬  {symbol} | {interval} | {days_back} jours …")
+    # try:
+    #     get_candles(symbol, days_back, interval, market_type)
+    # except Exception as e:
+    #     print("❌  Erreur :", e, file=sys.stderr)
+    #     sys.exit(1)
