@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Iterable, Optional, Literal, Tuple
+from typing import Iterable, Literal, Optional, Tuple
 
 import numpy as np
 from pykalman import KalmanFilter
-import pandas as pd
+
+import pandas as pd 
 
 ModelType = Literal["local_level", "local_linear_trend"]
 
@@ -15,31 +16,26 @@ ModelType = Literal["local_level", "local_linear_trend"]
 class KalmanParams:
     model: ModelType
     use_log: bool
-    kf: KalmanFilter  # pykalman object with fixed parameters
+    kf: KalmanFilter
 
 
 def fit_kalman_params_em(
     prices_train: Iterable[float],
     model: ModelType = "local_linear_trend",
     use_log: bool = True,
-    em_iter: int = 50,
+    em_iter: int = 60,
 ) -> KalmanParams:
-    """
-    Fit (EM) SUR TRAIN UNIQUEMENT => OK pour live / no-leak.
-    Retourne un KalmanFilter paramétré (Q,R, init, etc.).
-    """
     y = np.asarray(list(prices_train), dtype=float)
     if y.ndim != 1 or len(y) < 30:
         raise ValueError("prices_train doit être 1D et assez long (>= 30).")
     if not np.all(np.isfinite(y)):
         raise ValueError("prices_train contient NaN/inf.")
-    if np.any(y <= 0) and use_log:
-        raise ValueError("Prix <= 0: impossible en log.")
+    if use_log and np.any(y <= 0):
+        raise ValueError("Prix <= 0 impossible en log.")
 
     z = np.log(y) if use_log else y
     obs = z.reshape(-1, 1)
 
-    # Heuristiques robustes d'init (juste point de départ EM)
     var0 = float(np.var(z[: min(len(z), 60)]))
     var0 = max(var0, 1e-6)
     r0 = max(var0 * 0.2, 1e-6)
@@ -54,23 +50,16 @@ def fit_kalman_params_em(
             initial_state_mean=np.array([float(z[0])]),
             initial_state_covariance=np.array([[var0]]),
         )
-        em_vars = [
-            "transition_covariance",
-            "observation_covariance",
-            "initial_state_mean",
-            "initial_state_covariance",
-        ]
+        em_vars = ["transition_covariance", "observation_covariance",
+                   "initial_state_mean", "initial_state_covariance"]
 
     elif model == "local_linear_trend":
-        # State = [level, slope], obs = level
         A = np.array([[1.0, 1.0],
                       [0.0, 1.0]])
         H = np.array([[1.0, 0.0]])
-
         Q = np.array([[q0, 0.0],
                       [0.0, q0 * 0.1]])
         R = np.array([[r0]])
-
         kf0 = KalmanFilter(
             transition_matrices=A,
             observation_matrices=H,
@@ -80,84 +69,101 @@ def fit_kalman_params_em(
             initial_state_covariance=np.array([[var0, 0.0],
                                                [0.0, var0]]),
         )
-        em_vars = [
-            "transition_covariance",
-            "observation_covariance",
-            "initial_state_mean",
-            "initial_state_covariance",
-        ]
+        em_vars = ["transition_covariance", "observation_covariance",
+                   "initial_state_mean", "initial_state_covariance"]
     else:
         raise ValueError("model inconnu.")
 
     kf = kf0.em(obs, n_iter=em_iter, em_vars=em_vars)
-
     return KalmanParams(model=model, use_log=use_log, kf=kf)
 
 
-class OnlineKalmanCloseFilter:
+class OnlineKalmanWithInnovation:
     """
-    Filtre ONLINE no-leak: à t, tu fournis close_t => tu obtiens filtered_close_t = x_{t|t}.
-    - Aucun smooth
-    - Aucun recalibrage sur le futur
+    Streaming NO-LEAK:
+    - input: close_t
+    - output: filtered_close_t (= x_{t|t} en prix),
+              innovation_normalized_t (= epsilon_t)
     """
 
-    __slots__ = ("params", "_kf", "_m", "_P", "_obs_buf")
+    __slots__ = ("params", "A", "H", "Q", "R", "m", "P")
 
     def __init__(self, params: KalmanParams):
         self.params = params
-        self._kf = params.kf
+        kf = params.kf
 
-        # buffers pour réduire allocations
-        self._obs_buf = np.empty((1,), dtype=float)
+        self.A = np.asarray(kf.transition_matrices, dtype=float)          # (n,n)
+        self.H = np.asarray(kf.observation_matrices, dtype=float)         # (1,n)
+        self.Q = np.asarray(kf.transition_covariance, dtype=float)        # (n,n)
+        self.R = np.asarray(kf.observation_covariance, dtype=float)       # (1,1)
 
-        # initial state depuis kf (figé)
-        self._m = np.array(self._kf.initial_state_mean, dtype=float)
-        self._P = np.array(self._kf.initial_state_covariance, dtype=float)
+        self.m = np.asarray(kf.initial_state_mean, dtype=float).copy()    # (n,)
+        self.P = np.asarray(kf.initial_state_covariance, dtype=float).copy()  # (n,n)
+
+        if self.H.shape[0] != 1:
+            raise ValueError("Cette implémentation suppose une observation 1D (un close).")
 
     def reset(self) -> None:
-        """Réinitialise l'état (utile si tu relances un backtest)."""
-        self._m = np.array(self._kf.initial_state_mean, dtype=float)
-        self._P = np.array(self._kf.initial_state_covariance, dtype=float)
+        kf = self.params.kf
+        self.m = np.asarray(kf.initial_state_mean, dtype=float).copy()
+        self.P = np.asarray(kf.initial_state_covariance, dtype=float).copy()
 
-    def update(self, close_t: float) -> float:
+    def update(self, close_t: float) -> Tuple[float, float, float, float]:
         """
-        Ingestion du close en t -> retourne le close filtré en t (no-leak).
+        Retourne:
+          filtered_price_t,
+          eps_t (innovation normalisée),
+          innov_t (en log/prix selon use_log),
+          S_t (variance innovation)
         """
         if not np.isfinite(close_t):
             raise ValueError("close_t NaN/inf.")
         if self.params.use_log:
             if close_t <= 0:
                 raise ValueError("close_t <= 0 impossible en log.")
-            z = math.log(close_t)
+            z = math.log(float(close_t))
         else:
             z = float(close_t)
 
-        self._obs_buf[0] = z
+        # 1) Predict: m_pred = A m, P_pred = A P A' + Q
+        m_pred = self.A @ self.m
+        P_pred = self.A @ self.P @ self.A.T + self.Q
 
-        # filter_update = (predict + update) sur UNE observation => online, sans futur
-        self._m, self._P = self._kf.filter_update(
-            filtered_state_mean=self._m,
-            filtered_state_covariance=self._P,
-            observation=self._obs_buf,
-        )
+        # 2) Innovation: nu = z - H m_pred ; S = H P_pred H' + R
+        y_pred = float((self.H @ m_pred).reshape(()))
+        nu = z - y_pred
 
-        level = float(self._m[0])  # level latent
-        return math.exp(level) if self.params.use_log else level
+        S = float((self.H @ P_pred @ self.H.T).reshape(()) + self.R.reshape(()))
+        if S <= 0:
+            # ultra rare, mais on protège
+            S = 1e-12
 
-    def filter_series(self, prices: Iterable[float]) -> np.ndarray:
-        """
-        Applique le filtre en streaming sur toute la série.
-        Sortie: filtered[t] = x_{t|t} (no-leak).
-        """
+        eps = nu / math.sqrt(S)
+
+        # 3) Update: K = P_pred H' / S (S scalaire)
+        K = (P_pred @ self.H.T) / S  # (n,1)
+        self.m = m_pred + (K[:, 0] * nu)
+        self.P = P_pred - (K @ K.T) * S
+
+        level = float(self.m[0])
+        filtered_price = math.exp(level) if self.params.use_log else level
+
+        return filtered_price, float(eps), float(nu), float(S)
+
+    def run(self, prices: Iterable[float]) -> Tuple[np.ndarray, np.ndarray]:
         y = np.asarray(list(prices), dtype=float)
-        out = np.empty_like(y)
-        for i, p in enumerate(y):
-            out[i] = self.update(float(p))
-        return out
+        filt = np.empty_like(y)
+        eps = np.empty_like(y)
+
+        for t, p in enumerate(y):
+            fp, e, _, _ = self.update(float(p))
+            filt[t] = fp
+            eps[t] = e
+        return filt, eps
 
 
 def main():
-    # On suppose que `prices` (S&P 500 closes) existe déjà (liste/array)
+    # `prices` doit exister : liste/array des closes S&P 500
     data = pd.read_csv(r"C:\Users\Gajic\OneDrive - Université Paris-Dauphine\Trading\Trading-vol-Kalman\get_data\Index\output\SPY\SPY_15m_60d.csv") 
     prices = np.array(data["Close"])
     try:
@@ -167,34 +173,38 @@ def main():
 
     prices = np.asarray(prices, dtype=float)
 
-    # --- 1) Calibration "offline" SUR UN PASSE (train) ---
-    # En live: tu calibres une fois avec l'historique disponible (ex: 2-5 ans),
-    # puis tu figes les paramètres.
+    # Calibration sans leak: uniquement sur un passé (train)
     split = int(0.7 * len(prices))
     train = prices[:split]
 
     params = fit_kalman_params_em(
         prices_train=train,
-        model="local_linear_trend",  # généralement meilleur qu'un simple niveau
+        model="local_linear_trend",
         use_log=True,
         em_iter=60,
     )
 
-    # --- 2) Filtrage ONLINE sur toute la série (no-leak dans l'état) ---
-    kf_live = OnlineKalmanCloseFilter(params)
-    filtered = kf_live.filter_series(prices)
+    # Live/streaming no-leak: x_{t|t} + innovation normalisée
+    online = OnlineKalmanWithInnovation(params)
+    filtered, eps = online.run(prices)
 
-    # Exemple: close filtré à t (dernier point)
     print("Dernier close obs :", float(prices[-1]))
     print("Dernier close filt:", float(filtered[-1]))
+    print("Dernière eps (z)  :", float(eps[-1]))
 
-    # (Optionnel) plot
+    # Plot (optionnel)
     import matplotlib.pyplot as plt
     plt.figure()
     plt.plot(prices, label="Close observé")
     plt.plot(filtered, label="Close filtré (x_{t|t}, no-leak)")
     plt.legend()
-    plt.title("S&P 500 — Filtre Kalman ONLINE (pykalman, no-leak)")
+    plt.title("S&P 500 — Filtre online no-leak (état filtré)")
+    plt.show()
+
+    plt.figure()
+    plt.plot(eps, label="Innovation normalisée ε_t")
+    plt.legend()
+    plt.title("Innovation normalisée (standardized forecast error)")
     plt.show()
 
 
