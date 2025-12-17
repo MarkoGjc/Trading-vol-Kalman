@@ -6,7 +6,7 @@ from typing import Iterable, Literal, Optional, Tuple
 
 import numpy as np
 from pykalman import KalmanFilter
-
+import matplotlib.pyplot as plt
 import pandas as pd 
 
 ModelType = Literal["local_level", "local_linear_trend"]
@@ -163,49 +163,80 @@ class OnlineKalmanWithInnovation:
 
 
 def main():
-    # `prices` doit exister : liste/array des closes S&P 500
     data = pd.read_csv(r"C:\Users\Gajic\OneDrive - Université Paris-Dauphine\Trading\Trading-vol-Kalman\get_data\Index\output\SPY\SPY_15m_60d.csv") 
     prices = np.array(data["Close"])
+    # `prices` doit exister : liste/array de closes S&P 500
     try:
         prices  # noqa: F821
     except NameError:
         raise NameError("Définis `prices = [...]` avant d'exécuter.")
 
-    prices = np.asarray(prices, dtype=float)
 
-    # Calibration sans leak: uniquement sur un passé (train)
+
+
+    prices = np.asarray(prices, dtype=float)
+    if prices.ndim != 1 or len(prices) < 50:
+        raise ValueError("`prices` doit être 1D et assez long (>= 50).")
+    if not np.all(np.isfinite(prices)):
+        raise ValueError("`prices` contient NaN/inf.")
+    if np.any(prices <= 0):
+        raise ValueError("Prix <= 0 : impossible si use_log=True.")
+
+    # --- split train/test (tu peux mettre une date fixe plus tard) ---
     split = int(0.7 * len(prices))
     train = prices[:split]
+    test = prices[split:]
 
+    # --- 1) Calibration OFFLINE sur TRAIN uniquement (pas de leak futur) ---
     params = fit_kalman_params_em(
         prices_train=train,
-        model="local_linear_trend",
+        model="local_linear_trend",  # ou "local_level"
         use_log=True,
         em_iter=60,
     )
 
-    # Live/streaming no-leak: x_{t|t} + innovation normalisée
+    # --- 2) Engine ONLINE (paramètres FIXES), warm-up sur train sans enregistrer ---
     online = OnlineKalmanWithInnovation(params)
-    filtered, eps = online.run(prices)
 
-    print("Dernier close obs :", float(prices[-1]))
-    print("Dernier close filt:", float(filtered[-1]))
-    print("Dernière eps (z)  :", float(eps[-1]))
+    for p in train:
+        online.update(float(p))  # on met l'état "au bon endroit", mais on ne garde pas les valeurs
 
-    # Plot (optionnel)
-    import matplotlib.pyplot as plt
+    # --- 3) Période TEST/LIVE : on enregistre x_{t|t} et epsilon_t ---
+    filtered_test = np.empty_like(test)
+    eps_test = np.empty_like(test)
+
+    for i, p in enumerate(test):
+        fp, e, _, _ = online.update(float(p))
+        filtered_test[i] = fp
+        eps_test[i] = e
+
+    # Pour un plot aligné sur la série complète : NaN avant split
+    filtered_all = np.full_like(prices, np.nan)
+    eps_all = np.full_like(prices, np.nan)
+    filtered_all[split:] = filtered_test
+    eps_all[split:] = eps_test
+
+    print("Dernier close obs  :", float(prices[-1]))
+    print("Dernier close filt :", float(filtered_test[-1]))
+    print("Dernière eps       :", float(eps_test[-1]))
+    print("split index        :", split)
+
+    # --- 4) Plots (la partie filtrée n'apparaît que sur la zone tradable) ---
     plt.figure()
     plt.plot(prices, label="Close observé")
-    plt.plot(filtered, label="Close filtré (x_{t|t}, no-leak)")
+    plt.plot(filtered_all, label="Close filtré x_{t|t} (NO-LEAK, seulement test/live)")
+    plt.axvline(split, linestyle="--", label="Split train/test")
     plt.legend()
-    plt.title("S&P 500 — Filtre online no-leak (état filtré)")
+    plt.title("S&P 500 — Filtre Kalman ONLINE (params fixes, no-leak)")
     plt.show()
 
     plt.figure()
-    plt.plot(eps, label="Innovation normalisée ε_t")
+    plt.plot(eps_all, label="Innovation normalisée ε_t (test/live)")
+    plt.axvline(split, linestyle="--", label="Split train/test")
     plt.legend()
-    plt.title("Innovation normalisée (standardized forecast error)")
+    plt.title("ε_t (standardized forecast error) — no-leak")
     plt.show()
+
 
 
 if __name__ == "__main__":
