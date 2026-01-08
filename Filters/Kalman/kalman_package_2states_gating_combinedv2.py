@@ -457,12 +457,64 @@ def main():
     print("Dernier eps_raw_mix   :", float(eps_raw_mix_test[-1]))
     print("Dernier eps_rob_mix   :", float(eps_rob_mix_test[-1]))
 
+
+
+    # NEW: z-scores sur la différence (log-space) + plots
+    # gap en log (cohérent avec le modèle en log-prix)
+    gap_all = np.log(prices_arr) - np.log(filt_all)
+
+    # EWMA causal de la variance du gap (shift(1) => pas de leak)
+    gap2_ewm = pd.Series(gap_all).pow(2).ewm(span=200, adjust=False).mean().shift(1).to_numpy()
+    sigma_gap = np.sqrt(np.maximum(gap2_ewm, 1e-12))
+
+    z_gap = gap_all / sigma_gap  # z-score "y_t - yhat_{t|t}" normalisé
+    
     plt.figure()
-    plt.plot(prices_arr, label="Close observé")
-    plt.plot(filt_all, label="Close filtré (IMM, x_{t|t}, no-leak, test only)")
+    plt.plot(z_gap, label="z_gap (log(close) - log(filtered_close))")
+    plt.axvline(split, linestyle="--", label="Split train/test")
+    plt.axhline(0.0, linestyle="--")
+    plt.legend()
+    plt.title("IMM — z-score du gap (cohérent log, EWMA causal)")
+    plt.show()
+
+    plt.figure()
+    plt.plot(sigma_gap, label="sigma_gap (EWMA, causal)")
     plt.axvline(split, linestyle="--", label="Split train/test")
     plt.legend()
-    plt.title("IMM 2 régimes — close filtré (no-leak)")
+    plt.title("IMM — sigma du gap (EWMA, causal)")
+    plt.show()
+    
+    # NEW PLOT: différence prix réel - prix filtré
+    diff_all = prices_arr - filt_all
+    fig, ax1 = plt.subplots()
+    ax1.plot(prices_arr, label="Close observé")
+    ax1.plot(filt_all, label="Close filtré (IMM, x_{t|t}, no-leak, test only)")
+    ax1.axvline(split, linestyle="--", label="Split train/test")
+    ax1.set_title("IMM — Close & Close filtré + z_gap (même graphe)")
+    ax1.set_ylabel("Prix")
+    ax1.legend(loc="upper left")
+
+    ax2 = ax1.twinx()
+    ax2.plot(z_gap, label="z_gap", alpha=0.6)
+    ax2.axhline(0.0, linestyle="--", alpha=0.6)
+
+    # AJOUT: diff_all rendu visible sur l'axe droit
+    diff_scale = np.nanstd(diff_all)
+    diff_zlike = diff_all / (diff_scale if diff_scale > 0 else 1.0)
+    ax2.plot(diff_zlike, label="diff_all (scaled)", alpha=0.6)
+
+    ax2.set_ylabel("z_gap / diff_all(scaled)")
+    ax2.legend(loc="upper right")
+
+    plt.show()
+
+
+
+    plt.figure()
+    plt.plot(diff_all, label="Close observé - Close filtré")
+    plt.axvline(split, linestyle="--", label="Split train/test")
+    plt.legend()
+    plt.title("IMM — différence (prix réel - prix filtré)")
     plt.show()
 
     plt.figure()
