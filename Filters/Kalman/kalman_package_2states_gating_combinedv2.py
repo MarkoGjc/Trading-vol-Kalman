@@ -13,6 +13,64 @@ import pandas as pd
 # ----------------------------
 import numpy as np
 
+import matplotlib.pyplot as plt
+
+def plot_price_and_filtered_with_alerts(
+    prices,
+    filtered_prices,
+    threshold=0.0375,
+    x=None,                   # optionnel: liste de dates/indices, sinon 0..n-1
+    title=None,
+    figsize=(12, 6),
+    show=True
+):
+    """
+    Trace prix réel vs prix filtré et marque en rouge les points où
+    abs((price - filtered)/price) > threshold.
+
+    Returns:
+        pct_diff (np.ndarray): différence relative absolue
+        mask (np.ndarray bool): True si dépassement du seuil
+        fig, ax: objets matplotlib
+    """
+    p = np.asarray(prices, dtype=float)
+    f = np.asarray(filtered_prices, dtype=float)
+
+    if p.shape != f.shape:
+        raise ValueError(f"prices et filtered_prices doivent avoir la même longueur: {len(p)} vs {len(f)}")
+
+    n = len(p)
+    if x is None:
+        x = np.arange(n)
+    else:
+        if len(x) != n:
+            raise ValueError(f"x doit avoir la même longueur que prices: {len(x)} vs {n}")
+
+    # pct diff: abs((p - f)/p). Gestion p==0 pour éviter division par 0.
+    denom = np.where(np.abs(p) > 0, np.abs(p), np.nan)
+    pct_diff = np.abs(p - f) / denom
+
+    mask = pct_diff > threshold
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.plot(x, p, label="Prix (réel)")
+    ax.plot(x, f, label="Prix filtré")
+
+    # points rouges sur le prix réel là où dépassement du seuil
+    ax.scatter(np.asarray(x)[mask], p[mask], marker="o", s=30, color="red", label=f"|diff| > {threshold:.4f}")
+
+    ax.set_xlabel("Index" if x is None else "Temps")
+    ax.set_ylabel("Prix")
+    if title:
+        ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    if show:
+        plt.show()
+
+    return pct_diff, mask, fig, ax
+
 def outlier_report(eps, name="eps"):
     eps = np.asarray(eps, float)
     eps = eps[np.isfinite(eps)]
@@ -457,58 +515,34 @@ def main():
     print("Dernier eps_raw_mix   :", float(eps_raw_mix_test[-1]))
     print("Dernier eps_rob_mix   :", float(eps_rob_mix_test[-1]))
 
+    diff_all = prices_arr - filt_all
 
 
-    # NEW: z-scores sur la différence (log-space) + plots
-    # gap en log (cohérent avec le modèle en log-prix)
-    gap_all = np.log(prices_arr) - np.log(filt_all)
-
-    # EWMA causal de la variance du gap (shift(1) => pas de leak)
-    gap2_ewm = pd.Series(gap_all).pow(2).ewm(span=200, adjust=False).mean().shift(1).to_numpy()
-    sigma_gap = np.sqrt(np.maximum(gap2_ewm, 1e-12))
-
-    z_gap = gap_all / sigma_gap  # z-score "y_t - yhat_{t|t}" normalisé
+    pct_diff, mask, fig, ax = plot_price_and_filtered_with_alerts(
+    prices=prices_arr,
+    filtered_prices= filt_all,
+    threshold=0.00025,
+  # optionnel (timestamps), sinon indices
+    title="Prix vs Prix filtré + alertes"
+    )
+    print(pct_diff)
     
     plt.figure()
-    plt.plot(z_gap, label="z_gap (log(close) - log(filtered_close))")
+    plt.plot(pct_diff, label="pct_diff")
     plt.axvline(split, linestyle="--", label="Split train/test")
     plt.axhline(0.0, linestyle="--")
     plt.legend()
     plt.title("IMM — z-score du gap (cohérent log, EWMA causal)")
     plt.show()
 
+    # FIGURE 1 : prix vs prix filtré
     plt.figure()
-    plt.plot(sigma_gap, label="sigma_gap (EWMA, causal)")
+    plt.plot(prices_arr, label="Close observé")
+    plt.plot(filt_all, label="Close filtré (test only)")
     plt.axvline(split, linestyle="--", label="Split train/test")
     plt.legend()
-    plt.title("IMM — sigma du gap (EWMA, causal)")
-    plt.show()
-    
-    # NEW PLOT: différence prix réel - prix filtré
-    diff_all = prices_arr - filt_all
-    fig, ax1 = plt.subplots()
-    ax1.plot(prices_arr, label="Close observé")
-    ax1.plot(filt_all, label="Close filtré (IMM, x_{t|t}, no-leak, test only)")
-    ax1.axvline(split, linestyle="--", label="Split train/test")
-    ax1.set_title("IMM — Close & Close filtré + z_gap (même graphe)")
-    ax1.set_ylabel("Prix")
-    ax1.legend(loc="upper left")
-
-    ax2 = ax1.twinx()
-    ax2.plot(z_gap, label="z_gap", alpha=0.6)
-    ax2.axhline(0.0, linestyle="--", alpha=0.6)
-
-    # AJOUT: diff_all rendu visible sur l'axe droit
-    diff_scale = np.nanstd(diff_all)
-    diff_zlike = diff_all / (diff_scale if diff_scale > 0 else 1.0)
-    ax2.plot(diff_zlike, label="diff_all (scaled)", alpha=0.6)
-
-    ax2.set_ylabel("z_gap / diff_all(scaled)")
-    ax2.legend(loc="upper right")
-
-    plt.show()
-
-
+    plt.title("Prix vs prix filtré")
+    plt.show(block=False)   # <-- important pour pouvoir déplacer la fenêtre avant la suivante
 
     plt.figure()
     plt.plot(diff_all, label="Close observé - Close filtré")
@@ -558,6 +592,7 @@ def main():
 
     outlier_report(eps_raw_high_test[maskH], "eps_raw_high | high")
     outlier_report(eps_rob_high_test[maskH], "eps_rob_high | high")
+
 
 if __name__ == "__main__":
     main()
