@@ -25,33 +25,23 @@ def plot_price_and_filtered_with_alerts(
     prices,
     filtered_prices,
     threshold=0.0375,
-    x=None,                   # optionnel: liste de dates/indices, sinon 0..n-1
+    x=None,
     title=None,
     figsize=(12, 6),
     show=True,
     markersize=4,
     linewidth=1.5,
-    pi_high=None,             # ✅ nouvelle liste (même longueur) ou None
-    pi_fmt="{:.2f}",          # format d'affichage
-    annotate_offset=(0, 8),   # offset en points (x,y) pour l'annotation
+    pi_high=None,
+    slope=None,                # slope_pct_mix (fraction)
+    pi_fmt="{:.2f}",
+    slope_bps_decimals=1,      # ✅ ex: 1 décimale en bps
+    annotate_offset=(0, 8),
 ):
-    """
-    Trace prix réel vs prix filtré avec des points visibles (markers),
-    et marque en rouge les points où abs((price - filtered)/price) > threshold.
-    Si pi_high est fourni, annote chaque point rouge avec la valeur pi_high correspondante.
-
-    Returns:
-        pct_diff (np.ndarray): différence relative absolue
-        mask (np.ndarray bool): True si dépassement du seuil
-        fig, ax: objets matplotlib
-    """
     p = np.asarray(prices, dtype=float)
     f = np.asarray(filtered_prices, dtype=float)
 
     if p.shape != f.shape:
-        raise ValueError(
-            f"prices et filtered_prices doivent avoir la même longueur: {len(p)} vs {len(f)}"
-        )
+        raise ValueError(f"prices et filtered_prices doivent avoir la même longueur: {len(p)} vs {len(f)}")
 
     n = len(p)
     if x is None:
@@ -60,6 +50,7 @@ def plot_price_and_filtered_with_alerts(
         if len(x) != n:
             raise ValueError(f"x doit avoir la même longueur que prices: {len(x)} vs {n}")
 
+    # pi_high validation
     if pi_high is not None:
         pi = np.asarray(pi_high, dtype=float)
         if len(pi) != n:
@@ -67,40 +58,42 @@ def plot_price_and_filtered_with_alerts(
     else:
         pi = None
 
-    # pct diff: abs((p - f)/p). Gestion p==0 pour éviter division par 0.
+    # slope validation
+    if slope is not None:
+        sl = np.asarray(slope, dtype=float)
+        if len(sl) != n:
+            raise ValueError(f"slope doit avoir la même longueur que prices: {len(sl)} vs {n}")
+    else:
+        sl = None
+
+    # pct diff
     denom = np.where(np.abs(p) > 0, np.abs(p), np.nan)
     pct_diff = np.abs(p - f) / denom
     mask = pct_diff > threshold
 
     fig, ax = plt.subplots(figsize=figsize)
 
-    # ✅ Points + lignes
-    ax.plot(
-        x, p,
-        marker="o", linestyle="-",
-        markersize=markersize, linewidth=linewidth,
-        label="Prix (réel)"
-    )
-    ax.plot(
-        x, f,
-        marker="o", linestyle="-",
-        markersize=markersize, linewidth=linewidth,
-        label="Prix filtré"
-    )
+    ax.plot(x, p, marker="o", linestyle="-", markersize=markersize, linewidth=linewidth, label="Prix (réel)")
+    ax.plot(x, f, marker="o", linestyle="-", markersize=markersize, linewidth=linewidth, label="Prix filtré")
 
-    # ✅ Points rouges sur le prix réel quand dépassement
     x_arr = np.asarray(x)
-    ax.scatter(
-        x_arr[mask], p[mask],
-        s=40, color="red",
-        label=f"|diff| > {threshold:.4f}"
-    )
+    ax.scatter(x_arr[mask], p[mask], s=40, color="red", label=f"|diff| > {threshold:.4f}")
 
-    # ✅ Annotation pi_high sur chaque point rouge
-    if pi is not None and mask.any():
-        for xi, yi, pii in zip(x_arr[mask], p[mask], pi[mask]):
+    # Annotations: pi + slope (bps)
+    if mask.any() and (pi is not None or sl is not None):
+        for idx in np.where(mask)[0]:
+            xi = x_arr[idx]
+            yi = p[idx]
+
+            parts = []
+            if pi is not None:
+                parts.append(f"pi={pi_fmt.format(pi[idx])}")
+            if sl is not None:
+                slope_bps = sl[idx] * 10000.0
+                parts.append(f"slope={slope_bps:.{slope_bps_decimals}f} bps")
+
             ax.annotate(
-                pi_fmt.format(pii),
+                "\n".join(parts),
                 (xi, yi),
                 textcoords="offset points",
                 xytext=annotate_offset,
@@ -329,7 +322,7 @@ class IMM2Regimes:
 
     def update(
         self, close_t: float
-    ) -> Tuple[float, float, float, float, float, float, float, float]:
+    ) -> Tuple[float, float, float, float, float, float, float, float, float]:
         # --- observation ---
         if not np.isfinite(close_t):
             raise ValueError("close_t NaN/inf.")
@@ -436,9 +429,13 @@ class IMM2Regimes:
         # --- aggregated state ---
         m_bar = mu[0] * self.m[0] + mu[1] * self.m[1]
         level = float(m_bar[0])
+        slope_mix = float(m_bar[1])  # ✅ slope (log-price per bar si use_log=True)
 
         filtered_close = math.exp(level) if self.use_log else level
         pi_high = float(mu[1])
+
+        # ✅ slope en % par barre (plus interprétable)
+        slope_pct_mix = (math.exp(slope_mix) - 1.0) if self.use_log else slope_mix
 
         # --- outputs raw + robust ---
         eps_raw_low = float(eps_raw[0])
@@ -453,9 +450,9 @@ class IMM2Regimes:
             float(filtered_close),
             pi_high,
             eps_raw_low, eps_raw_high, eps_raw_mix,
-            eps_robust_low, eps_robust_high, eps_robust_mix
+            eps_robust_low, eps_robust_high, eps_robust_mix,
+            float(slope_pct_mix),   # ✅ ajouté (rendement attendu par barre)
         )
-
 
 
 
@@ -521,10 +518,13 @@ def main():
     eps_rob_high_test = np.empty_like(test)
     eps_rob_mix_test  = np.empty_like(test)
 
+    slope_pct_mix_test = np.empty_like(test)
+
     for i, p in enumerate(test):
         (f, ph,
         erL, erH, erM,
-        eL,  eH,  eM) = imm.update(float(p))
+        eL,  eH,  eM,
+        slope_pct) = imm.update(float(p))
 
         filt_test[i] = f
         pi_high_test[i] = ph
@@ -536,6 +536,8 @@ def main():
         eps_rob_low_test[i] = eL
         eps_rob_high_test[i] = eH
         eps_rob_mix_test[i] = eM
+
+        slope_pct_mix_test[i] = slope_pct
 
     # Quick sanity stats (sur test)
     print("eps_raw_mix mean/std:", float(np.mean(eps_raw_mix_test)), float(np.std(eps_raw_mix_test)))
@@ -575,7 +577,7 @@ def main():
     prices=test,
     filtered_prices= filt_test,
     threshold=0.0003,
-    pi_high = pi_high_test,
+    pi_high = pi_high_test,slope=slope_pct_mix_test,
   # optionnel (timestamps), sinon indices
     title="Prix vs Prix filtré + alertes"
     )
