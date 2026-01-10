@@ -18,6 +18,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import matplotlib.pyplot as plt
 
+import numpy as np
+import matplotlib.pyplot as plt
+
 def plot_price_and_filtered_with_alerts(
     prices,
     filtered_prices,
@@ -28,10 +31,14 @@ def plot_price_and_filtered_with_alerts(
     show=True,
     markersize=4,
     linewidth=1.5,
+    pi_high=None,             # ✅ nouvelle liste (même longueur) ou None
+    pi_fmt="{:.2f}",          # format d'affichage
+    annotate_offset=(0, 8),   # offset en points (x,y) pour l'annotation
 ):
     """
     Trace prix réel vs prix filtré avec des points visibles (markers),
     et marque en rouge les points où abs((price - filtered)/price) > threshold.
+    Si pi_high est fourni, annote chaque point rouge avec la valeur pi_high correspondante.
 
     Returns:
         pct_diff (np.ndarray): différence relative absolue
@@ -53,6 +60,13 @@ def plot_price_and_filtered_with_alerts(
         if len(x) != n:
             raise ValueError(f"x doit avoir la même longueur que prices: {len(x)} vs {n}")
 
+    if pi_high is not None:
+        pi = np.asarray(pi_high, dtype=float)
+        if len(pi) != n:
+            raise ValueError(f"pi_high doit avoir la même longueur que prices: {len(pi)} vs {n}")
+    else:
+        pi = None
+
     # pct diff: abs((p - f)/p). Gestion p==0 pour éviter division par 0.
     denom = np.where(np.abs(p) > 0, np.abs(p), np.nan)
     pct_diff = np.abs(p - f) / denom
@@ -60,7 +74,7 @@ def plot_price_and_filtered_with_alerts(
 
     fig, ax = plt.subplots(figsize=figsize)
 
-    # ✅ Points + lignes (comme ton image)
+    # ✅ Points + lignes
     ax.plot(
         x, p,
         marker="o", linestyle="-",
@@ -75,11 +89,24 @@ def plot_price_and_filtered_with_alerts(
     )
 
     # ✅ Points rouges sur le prix réel quand dépassement
+    x_arr = np.asarray(x)
     ax.scatter(
-        np.asarray(x)[mask], p[mask],
+        x_arr[mask], p[mask],
         s=40, color="red",
         label=f"|diff| > {threshold:.4f}"
     )
+
+    # ✅ Annotation pi_high sur chaque point rouge
+    if pi is not None and mask.any():
+        for xi, yi, pii in zip(x_arr[mask], p[mask], pi[mask]):
+            ax.annotate(
+                pi_fmt.format(pii),
+                (xi, yi),
+                textcoords="offset points",
+                xytext=annotate_offset,
+                ha="center",
+                fontsize=8
+            )
 
     ax.set_xlabel("Index" if x is None else "Temps")
     ax.set_ylabel("Prix")
@@ -92,6 +119,7 @@ def plot_price_and_filtered_with_alerts(
         plt.show()
 
     return pct_diff, mask, fig, ax
+
 
 
 def outlier_report(eps, name="eps"):
@@ -519,7 +547,9 @@ def main():
     print("eps_rob_low mean/std:", float(np.mean(eps_rob_low_test)), float(np.std(eps_rob_low_test)))
     print("eps_rob_high mean/std:", float(np.mean(eps_rob_high_test)), float(np.std(eps_rob_high_test)))
 
-
+    filt_test
+    test
+    
     # Align for plotting (NaN before split)
     filt_all = np.full_like(prices_arr, np.nan)
     pi_high_all = np.full_like(prices_arr, np.nan)
@@ -542,9 +572,10 @@ def main():
 
 
     pct_diff, mask, fig, ax = plot_price_and_filtered_with_alerts(
-    prices=prices_arr,
-    filtered_prices= filt_all,
+    prices=test,
+    filtered_prices= filt_test,
     threshold=0.0003,
+    pi_high = pi_high_test,
   # optionnel (timestamps), sinon indices
     title="Prix vs Prix filtré + alertes"
     )
