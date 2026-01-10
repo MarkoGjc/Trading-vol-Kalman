@@ -32,11 +32,22 @@ def plot_price_and_filtered_with_alerts(
     markersize=4,
     linewidth=1.5,
     pi_high=None,
-    slope=None,                # slope_pct_mix (fraction)
+    slope=None,                 # slope_pct_mix (fraction) -> affiché en bps
     pi_fmt="{:.2f}",
-    slope_bps_decimals=1,      # ✅ ex: 1 décimale en bps
+    slope_bps_decimals=1,
     annotate_offset=(0, 8),
+    lows=None,                  # ✅ liste des mins (même longueur)
+    highs=None,                 # ✅ liste des maxs (même longueur)
+    extrema_color="blue",
+    extrema_markersize=35,
 ):
+    """
+    Trace prix réel vs prix filtré avec markers,
+    points rouges quand abs((price-filtered)/price) > threshold.
+    Optionnel:
+      - annote pi_high + slope (en bps) sur les points rouges
+      - sur le point t+1 après chaque point rouge, plot un point bleu sur low[t+1] et high[t+1]
+    """
     p = np.asarray(prices, dtype=float)
     f = np.asarray(filtered_prices, dtype=float)
 
@@ -66,6 +77,17 @@ def plot_price_and_filtered_with_alerts(
     else:
         sl = None
 
+    # lows/highs validation
+    if (lows is None) ^ (highs is None):
+        raise ValueError("Il faut fournir lows ET highs, ou aucun des deux.")
+    if lows is not None and highs is not None:
+        lo = np.asarray(lows, dtype=float)
+        hi = np.asarray(highs, dtype=float)
+        if len(lo) != n or len(hi) != n:
+            raise ValueError(f"lows/highs doivent avoir la même longueur que prices: {len(lo)}, {len(hi)} vs {n}")
+    else:
+        lo = hi = None
+
     # pct diff
     denom = np.where(np.abs(p) > 0, np.abs(p), np.nan)
     pct_diff = np.abs(p - f) / denom
@@ -77,29 +99,46 @@ def plot_price_and_filtered_with_alerts(
     ax.plot(x, f, marker="o", linestyle="-", markersize=markersize, linewidth=linewidth, label="Prix filtré")
 
     x_arr = np.asarray(x)
+
+    # points rouges
     ax.scatter(x_arr[mask], p[mask], s=40, color="red", label=f"|diff| > {threshold:.4f}")
 
-    # Annotations: pi + slope (bps)
+    # annotations pi + slope (bps) sur points rouges
     if mask.any() and (pi is not None or sl is not None):
         for idx in np.where(mask)[0]:
-            xi = x_arr[idx]
-            yi = p[idx]
-
             parts = []
             if pi is not None:
                 parts.append(f"pi={pi_fmt.format(pi[idx])}")
             if sl is not None:
                 slope_bps = sl[idx] * 10000.0
-                parts.append(f"slope={slope_bps:.{slope_bps_decimals}f} bps")
-
+                parts.append(f"slope={slope_bps:+.{slope_bps_decimals}f} bps")
             ax.annotate(
                 "\n".join(parts),
-                (xi, yi),
+                (x_arr[idx], p[idx]),
                 textcoords="offset points",
                 xytext=annotate_offset,
                 ha="center",
                 fontsize=8
             )
+
+    # ✅ sur t+1 après chaque point rouge: plot low/high en bleu
+    if lo is not None and hi is not None and mask.any():
+        next_idx = np.where(mask)[0] + 1
+        next_idx = next_idx[next_idx < n]  # évite overflow sur le dernier point
+
+        # (optionnel) dédupliquer si plusieurs rouges consécutifs pointent vers le même t+1
+        next_idx = np.unique(next_idx)
+
+        ax.scatter(
+            x_arr[next_idx], lo[next_idx],
+            s=extrema_markersize, color=extrema_color, marker="v",
+            label="Low (t+1 après rouge)"
+        )
+        ax.scatter(
+            x_arr[next_idx], hi[next_idx],
+            s=extrema_markersize, color=extrema_color, marker="^",
+            label="High (t+1 après rouge)"
+        )
 
     ax.set_xlabel("Index" if x is None else "Temps")
     ax.set_ylabel("Prix")
@@ -466,6 +505,8 @@ def main():
     data = pd.read_csv(r"C:\Users\Gajic\OneDrive - Université Paris-Dauphine\Trading\Trading-vol-Kalman\get_data\Crypto\output\Futures\BTCUSDT\BTCUSDT_15m_400d.csv") 
     data = data.tail(10000)
     prices = np.array(data["Close"])
+    lows = np.array(data["Low"])
+    highs = np.array(data["High"])
     try:
         prices  # noqa: F821
     except NameError:
@@ -485,6 +526,8 @@ def main():
     split = int(0.7 * len(prices_arr))
     train = prices_arr[:split]
     test = prices_arr[split:]
+    test_lows = lows[split:]
+    test_highs = highs[split:]
 
     # 1) Fit base parameters on TRAIN ONLY (no-leak)
     base = fit_base_local_linear_trend_em(train, use_log=True, em_iter=60)
@@ -578,6 +621,8 @@ def main():
     filtered_prices= filt_test,
     threshold=0.0003,
     pi_high = pi_high_test,slope=slope_pct_mix_test,
+    lows=test_lows,                  
+    highs=test_highs,  
   # optionnel (timestamps), sinon indices
     title="Prix vs Prix filtré + alertes"
     )
