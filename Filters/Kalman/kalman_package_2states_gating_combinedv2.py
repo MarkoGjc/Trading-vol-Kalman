@@ -15,6 +15,9 @@ import numpy as np
 
 import matplotlib.pyplot as plt
 
+import numpy as np
+import matplotlib.pyplot as plt
+
 def plot_price_and_filtered_with_alerts(
     prices,
     filtered_prices,
@@ -22,11 +25,13 @@ def plot_price_and_filtered_with_alerts(
     x=None,                   # optionnel: liste de dates/indices, sinon 0..n-1
     title=None,
     figsize=(12, 6),
-    show=True
+    show=True,
+    markersize=4,
+    linewidth=1.5,
 ):
     """
-    Trace prix réel vs prix filtré et marque en rouge les points où
-    abs((price - filtered)/price) > threshold.
+    Trace prix réel vs prix filtré avec des points visibles (markers),
+    et marque en rouge les points où abs((price - filtered)/price) > threshold.
 
     Returns:
         pct_diff (np.ndarray): différence relative absolue
@@ -37,7 +42,9 @@ def plot_price_and_filtered_with_alerts(
     f = np.asarray(filtered_prices, dtype=float)
 
     if p.shape != f.shape:
-        raise ValueError(f"prices et filtered_prices doivent avoir la même longueur: {len(p)} vs {len(f)}")
+        raise ValueError(
+            f"prices et filtered_prices doivent avoir la même longueur: {len(p)} vs {len(f)}"
+        )
 
     n = len(p)
     if x is None:
@@ -49,15 +56,30 @@ def plot_price_and_filtered_with_alerts(
     # pct diff: abs((p - f)/p). Gestion p==0 pour éviter division par 0.
     denom = np.where(np.abs(p) > 0, np.abs(p), np.nan)
     pct_diff = np.abs(p - f) / denom
-
     mask = pct_diff > threshold
 
     fig, ax = plt.subplots(figsize=figsize)
-    ax.plot(x, p, label="Prix (réel)")
-    ax.plot(x, f, label="Prix filtré")
 
-    # points rouges sur le prix réel là où dépassement du seuil
-    ax.scatter(np.asarray(x)[mask], p[mask], marker="o", s=30, color="red", label=f"|diff| > {threshold:.4f}")
+    # ✅ Points + lignes (comme ton image)
+    ax.plot(
+        x, p,
+        marker="o", linestyle="-",
+        markersize=markersize, linewidth=linewidth,
+        label="Prix (réel)"
+    )
+    ax.plot(
+        x, f,
+        marker="o", linestyle="-",
+        markersize=markersize, linewidth=linewidth,
+        label="Prix filtré"
+    )
+
+    # ✅ Points rouges sur le prix réel quand dépassement
+    ax.scatter(
+        np.asarray(x)[mask], p[mask],
+        s=40, color="red",
+        label=f"|diff| > {threshold:.4f}"
+    )
 
     ax.set_xlabel("Index" if x is None else "Temps")
     ax.set_ylabel("Prix")
@@ -70,6 +92,7 @@ def plot_price_and_filtered_with_alerts(
         plt.show()
 
     return pct_diff, mask, fig, ax
+
 
 def outlier_report(eps, name="eps"):
     eps = np.asarray(eps, float)
@@ -521,7 +544,7 @@ def main():
     pct_diff, mask, fig, ax = plot_price_and_filtered_with_alerts(
     prices=prices_arr,
     filtered_prices= filt_all,
-    threshold=0.00025,
+    threshold=0.0003,
   # optionnel (timestamps), sinon indices
     title="Prix vs Prix filtré + alertes"
     )
