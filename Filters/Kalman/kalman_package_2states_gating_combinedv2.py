@@ -36,17 +36,22 @@ def plot_price_and_filtered_with_alerts(
     pi_fmt="{:.2f}",
     slope_bps_decimals=1,
     annotate_offset=(0, 8),
-    lows=None,                  # ✅ liste des mins (même longueur)
-    highs=None,                 # ✅ liste des maxs (même longueur)
+    lows=None,
+    highs=None,
     extrema_color="blue",
     extrema_markersize=35,
+    z_score=None,               # ✅ nouveau: liste/array même longueur
+    z_thresh=2.0,               # ✅ seuil |z| pour point vert
+    z_markersize=45,            # taille des points verts/noirs
 ):
     """
-    Trace prix réel vs prix filtré avec markers,
-    points rouges quand abs((price-filtered)/price) > threshold.
+    - Trace prix réel vs prix filtré avec markers.
+    - Points rouges si abs((price-filtered)/price) > threshold.
+    - Points verts si abs(z_score) > z_thresh.
+    - Si rouge ET vert au même index => point noir.
     Optionnel:
-      - annote pi_high + slope (en bps) sur les points rouges
-      - sur le point t+1 après chaque point rouge, plot un point bleu sur low[t+1] et high[t+1]
+      - annote pi_high + slope (en bps) sur les points rouges (y compris noirs)
+      - sur t+1 après chaque point rouge, plot low/high en bleu.
     """
     p = np.asarray(prices, dtype=float)
     f = np.asarray(filtered_prices, dtype=float)
@@ -88,10 +93,29 @@ def plot_price_and_filtered_with_alerts(
     else:
         lo = hi = None
 
-    # pct diff
+    # z_score validation
+    if z_score is not None:
+        z = np.asarray(z_score, dtype=float)
+        if len(z) != n:
+            raise ValueError(f"z_score doit avoir la même longueur que prices: {len(z)} vs {n}")
+    else:
+        z = None
+
+    # pct diff -> red mask
     denom = np.where(np.abs(p) > 0, np.abs(p), np.nan)
     pct_diff = np.abs(p - f) / denom
-    mask = pct_diff > threshold
+    mask_red = pct_diff > threshold
+
+    # z mask -> green mask
+    if z is not None:
+        mask_green = np.abs(z) > float(z_thresh)
+    else:
+        mask_green = np.zeros(n, dtype=bool)
+
+    # overlap -> black
+    mask_black = mask_red & mask_green
+    mask_red_only = mask_red & (~mask_black)
+    mask_green_only = mask_green & (~mask_black)
 
     fig, ax = plt.subplots(figsize=figsize)
 
@@ -100,12 +124,21 @@ def plot_price_and_filtered_with_alerts(
 
     x_arr = np.asarray(x)
 
-    # points rouges
-    ax.scatter(x_arr[mask], p[mask], s=40, color="red", label=f"|diff| > {threshold:.4f}")
+    # Points: red / green / black
+    if mask_red_only.any():
+        ax.scatter(x_arr[mask_red_only], p[mask_red_only], s=40, color="red",
+                   label=f"Rouge: |diff| > {threshold:.4f}")
+    if mask_green_only.any():
+        ax.scatter(x_arr[mask_green_only], p[mask_green_only], s=z_markersize, color="green",
+                   label=f"Vert: |z| > {z_thresh:g}")
+    if mask_black.any():
+        ax.scatter(x_arr[mask_black], p[mask_black], s=max(50, z_markersize), color="black",
+                   label="Noir: Rouge & Vert")
 
-    # annotations pi + slope (bps) sur points rouges
-    if mask.any() and (pi is not None or sl is not None):
-        for idx in np.where(mask)[0]:
+    # Annotations pi + slope sur les points rouges (rouges + noirs)
+    mask_annot = mask_red  # inclut black
+    if mask_annot.any() and (pi is not None or sl is not None):
+        for idx in np.where(mask_annot)[0]:
             parts = []
             if pi is not None:
                 parts.append(f"pi={pi_fmt.format(pi[idx])}")
@@ -121,12 +154,10 @@ def plot_price_and_filtered_with_alerts(
                 fontsize=8
             )
 
-    # ✅ sur t+1 après chaque point rouge: plot low/high en bleu
-    if lo is not None and hi is not None and mask.any():
-        next_idx = np.where(mask)[0] + 1
-        next_idx = next_idx[next_idx < n]  # évite overflow sur le dernier point
-
-        # (optionnel) dédupliquer si plusieurs rouges consécutifs pointent vers le même t+1
+    # sur t+1 après chaque point rouge (rouge + noir): low/high en bleu
+    if lo is not None and hi is not None and mask_red.any():
+        next_idx = np.where(mask_red)[0] + 1
+        next_idx = next_idx[next_idx < n]
         next_idx = np.unique(next_idx)
 
         ax.scatter(
@@ -150,7 +181,8 @@ def plot_price_and_filtered_with_alerts(
     if show:
         plt.show()
 
-    return pct_diff, mask, fig, ax
+    # je retourne aussi les masques pour debug
+    return pct_diff, mask_red, mask_green, mask_black, fig, ax
 
 
 
@@ -591,9 +623,6 @@ def main():
 
     print("eps_rob_low mean/std:", float(np.mean(eps_rob_low_test)), float(np.std(eps_rob_low_test)))
     print("eps_rob_high mean/std:", float(np.mean(eps_rob_high_test)), float(np.std(eps_rob_high_test)))
-
-    filt_test
-    test
     
     # Align for plotting (NaN before split)
     filt_all = np.full_like(prices_arr, np.nan)
@@ -616,20 +645,22 @@ def main():
     diff_all = prices_arr - filt_all
 
 
-    pct_diff, mask, fig, ax = plot_price_and_filtered_with_alerts(
+    pct_diff, mask_red, mask_green, mask_black, fig, ax = plot_price_and_filtered_with_alerts(
     prices=test,
     filtered_prices= filt_test,
     threshold=0.0003,
     pi_high = pi_high_test,slope=slope_pct_mix_test,
     lows=test_lows,                  
     highs=test_highs,  
+    z_score= eps_raw_mix_test,               
+    z_thresh=2.7,
   # optionnel (timestamps), sinon indices
     title="Prix vs Prix filtré + alertes"
     )
     print(pct_diff)
     
     plt.figure()
-    plt.plot(pct_diff, label="pct_diff")
+    plt.plot(eps_raw_mix_test, label="eps_raw_mix_test")
     plt.axvline(split, linestyle="--", label="Split train/test")
     plt.axhline(0.0, linestyle="--")
     plt.legend()
