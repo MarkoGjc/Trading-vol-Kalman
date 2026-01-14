@@ -1,43 +1,73 @@
 import numpy as np
 import pandas as pd
 
-import numpy as np
-import pandas as pd
-
-def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp1m(
+def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp_sl_1m_and_filters(
     df15m: pd.DataFrame,
     df1m: pd.DataFrame,
     *,
-    time_col: str = "Time",                 # OPEN time
+    time_col: str = "Time",                 # OPEN time (15m et 1m)
     filtered_col: str = "filtered_close",
-    red_threshold: float = 0.0020,          # 20 bps = 0.0020
-    entry_delay_min: int = 1,               # entrée = close+1min
-    exit_delay_min: int = 1,                # sortie "bar close" = close+1min (Open 1m)
-    fee_roundtrip_bps: float = 4.0,         # frais aller-retour
 
-    # TP/SL sur grille 15m (discret)
-    tp_bps: float = 15.0,
-    sl_bps: float = 25.0,
-    max_hold_bars: int = 8,                 # 8 bars = 2h
-
-    # ✅ nouveau: TP intraminute actif tant que la position est ouverte
-    tp_1min_bps: float = 55.0,              # si pnl_net >= tp_1min_bps => exit immédiat (au niveau TP)
-    tp1m_uses_highlow: bool = True,         # utilise High/Low 1m (sinon Close)
-
-    allow_overlap: bool = False,
+    # --- Signal rouge (15m) ---
+    red_threshold: float = 0.0020,          # ex: 0.002 = 20 bps
     require_entry_dislocation: bool = True,
-    min_entry_disloc_bps: float = 15.0,
+    min_entry_disloc_bps: float = 0.0,
 
+    # --- Timing ---
+    entry_delay_min: int = 1,               # entrée = close15 + 1min
+    exit_delay_min: int = 1,                # sortie (si décision 15m) = close15 + 1min
+
+    # --- Costs ---
+    fee_roundtrip_bps: float = 4.0,         # frais aller-retour (bps)
+
+    # --- Exits "lents" (discrets sur 15m) ---
+    tp_bps: float = 25.0,                   # NET bps (décision sur close 15m)
+    sl_bps: float = 50.0,                   # NET bps (décision sur close 15m)
+    max_hold_bars: int = 8,                 # time stop en barres 15m
+
+    # --- Exits "rapides" (intraminute 1m) ---
+    use_tp_1m: bool = True,
+    use_sl_1m: bool = True,
+    tp_1min_bps: float = 15.0,              # NET bps (actif si use_tp_1m)
+    sl_1min_bps: float = 30.0,              # NET bps (actif si use_sl_1m)
+    one_min_uses_highlow: bool = True,      # True: High/Low, False: Close
+    conservative_same_minute: bool = True,  # si TP et SL touchent même minute -> SL
+
+    # --- Filters (df15m columns) ---
+    use_pi_filter: bool = True,
+    pi_col: str = "pi_high",
+    pi_max: float = 0.85,
+
+    use_slope_filter: bool = True,
+    slope_col: str = "slope_pct_mix",       # fraction (ex: 0.0002)
+    slope_mom_bps: float = 3.0,             # bps/bar
+
+    # --- Overlap ---
+    allow_overlap: bool = False,
+
+    # --- Debug ---
     debug: bool = True,
     debug_every: int = 50,
 ):
     """
-    - Entry: close 15m + 1min (Open 1m)
-    - While open: if TP_1m hit on 1m bars -> immediate exit at TP price (conservative standard)
-    - Else: check TP/SL at 15m closes (discrete), exit at close+1min Open 1m
-    - Stop loss unchanged (checked at 15m close), no intraminute SL.
+    Objectif:
+      - Même logique que backtest_redpoints_entry_1m_exit_15m_discrete
+      - + TP/SL 1m optionnels
+      - + filtres pi_high / slope_pct_mix optionnels
+
+    Important:
+      - Time est OPEN time.
+      - Signal calculé au close de la bougie 15m (Time+15m).
+      - Entrée/exécution à close+1min via Open 1m.
+      - Si TP/SL 1m déclenche, on sort au prix barrière (tp_px / sl_px) au timestamp de hit.
+
+    Pour reproduire exactement (au mieux) la baseline:
+      use_tp_1m=False, use_sl_1m=False, use_pi_filter=False, use_slope_filter=False
     """
 
+    # -----------------------
+    # Prep
+    # -----------------------
     d15 = df15m.copy()
     d1 = df1m.copy()
 
@@ -47,60 +77,174 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp1m(
     d15 = d15.sort_values(time_col).reset_index(drop=True)
     d1 = d1.sort_values(time_col).set_index(time_col)
 
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        if col not in d15.columns:
+            raise ValueError(f"df15m doit contenir {col}")
+        if col not in d1.columns:
+            raise ValueError(f"df1m doit contenir {col}")
     if filtered_col not in d15.columns:
         raise ValueError(f"df15m doit contenir '{filtered_col}'.")
 
-    if debug:
-        print("[DEBUG] Input ranges")
-        print(f"  df15m: {d15[time_col].min()} -> {d15[time_col].max()} (rows={len(d15)})")
-        print(f"  df1m : {d1.index.min()} -> {d1.index.max()} (rows={len(d1)})")
-        print(f"  red_threshold={red_threshold} ({red_threshold*10000:.1f} bps)")
-        print(f"  tp_bps={tp_bps}, sl_bps={sl_bps}, tp_1min_bps={tp_1min_bps}, fees_rt={fee_roundtrip_bps} bps")
-        print(f"  entry_delay={entry_delay_min}m, exit_delay={exit_delay_min}m, max_hold_bars={max_hold_bars}")
-        print(f"  require_entry_dislocation={require_entry_dislocation}, min_entry_disloc_bps={min_entry_disloc_bps}")
+    if use_pi_filter and pi_col not in d15.columns:
+        raise ValueError(f"use_pi_filter=True mais '{pi_col}' absent de df15m.")
+    if use_slope_filter and slope_col not in d15.columns:
+        raise ValueError(f"use_slope_filter=True mais '{slope_col}' absent de df15m.")
 
-    idx1 = d1.index.values
+    idx1 = d1.index.values  # datetime64[ns], sorted
 
     def next_1m_open(ts: pd.Timestamp):
-        ts64 = np.datetime64(ts)
-        pos = idx1.searchsorted(ts64, side="left")
+        pos = idx1.searchsorted(np.datetime64(ts), side="left")
         if pos >= len(idx1):
             return None
         return pd.Timestamp(idx1[pos])
 
-    # --- red points + direction ---
+    # Fractions
+    fee_frac = float(fee_roundtrip_bps) / 1e4
+    tp15_frac = float(tp_bps) / 1e4
+    sl15_frac = float(sl_bps) / 1e4
+
+    tp1_net = float(tp_1min_bps) / 1e4
+    sl1_net = float(sl_1min_bps) / 1e4
+
+    # -----------------------
+    # Signal rouge + direction
+    # -----------------------
     close15 = d15["Close"].astype(float).values
     filt15 = d15[filtered_col].astype(float).values
     denom = np.where(np.abs(close15) > 0, np.abs(close15), np.nan)
     pct_diff = np.abs(close15 - filt15) / denom
     is_red = pct_diff > float(red_threshold)
+
+    # direction MR: close>filtered => short (-1), close<filtered => long (+1)
     side = (-np.sign(close15 - filt15)).astype(int)
 
     open15 = pd.to_datetime(d15[time_col])
     close15_time = open15 + pd.Timedelta(minutes=15)
 
     if debug:
+        print("[DEBUG] Input ranges")
+        print(f"  df15m: {d15[time_col].min()} -> {d15[time_col].max()} (rows={len(d15)})")
+        print(f"  df1m : {d1.index.min()} -> {d1.index.max()} (rows={len(d1)})")
+        print(f"  red_threshold={red_threshold} ({red_threshold*10000:.1f} bps)")
+        print(f"  TP15={tp_bps}bps SL15={sl_bps}bps  fees_rt={fee_roundtrip_bps}bps  H={max_hold_bars} bars")
+        print(f"  1m exits: use_tp_1m={use_tp_1m} tp_1min_bps={tp_1min_bps} | use_sl_1m={use_sl_1m} sl_1min_bps={sl_1min_bps}")
+        print(f"  entry_delay={entry_delay_min}m exit_delay={exit_delay_min}m")
+        print(f"  entry filters: require_entry_dislocation={require_entry_dislocation}, min_entry_disloc_bps={min_entry_disloc_bps}")
+        if use_pi_filter:
+            print(f"  pi_filter: {pi_col} <= {pi_max}")
+        if use_slope_filter:
+            print(f"  slope_filter: {slope_col} with |mom| threshold {slope_mom_bps} bps/bar")
         print("[DEBUG] Red stats")
         print(f"  red_count={int(is_red.sum())}/{len(d15)} ({is_red.mean()*100:.2f}%)")
 
-    fee_frac = float(fee_roundtrip_bps) / 1e4
-    tp_frac = float(tp_bps) / 1e4
-    sl_frac = float(sl_bps) / 1e4
+    # -----------------------
+    # Helpers: compute 1m barrier prices (NET thresholds)
+    # -----------------------
+    def compute_tp_sl_prices(entry_px: float, s: int):
+        """
+        Convert NET thresholds to price levels.
+        pnl_net = pnl_gross - fee_frac
 
-    tp1_frac = float(tp_1min_bps) / 1e4
+        LONG:
+          pnl_gross = exit/entry - 1
+          TP net: pnl_gross = fee + tp1_net  => exit = entry*(1 + fee + tp1_net)
+          SL net: pnl_gross = fee - sl1_net  => exit = entry*(1 + fee - sl1_net)
 
+        SHORT:
+          pnl_gross = entry/exit - 1
+          TP net: entry/exit - 1 - fee = tp1_net  => exit = entry / (1 + fee + tp1_net)
+          SL net: entry/exit - 1 - fee = -sl1_net => exit = entry / (1 + fee - sl1_net)
+
+        Si une barrière est désactivée ou invalide (<=0 / denom<=0), elle renvoie None.
+        """
+        tp_px = None
+        sl_px = None
+
+        if use_tp_1m:
+            if s == 1:
+                tp_px = entry_px * (1.0 + fee_frac + tp1_net)
+            else:
+                tp_px = entry_px / (1.0 + fee_frac + tp1_net)
+
+        if use_sl_1m:
+            if s == 1:
+                sl_px = entry_px * (1.0 + fee_frac - sl1_net)
+                if sl_px <= 0:
+                    sl_px = None
+            else:
+                denom = (1.0 + fee_frac - sl1_net)
+                if denom <= 0:
+                    sl_px = None
+                else:
+                    sl_px = entry_px / denom
+
+        return tp_px, sl_px
+
+    def first_hit_time_1m(w1: pd.DataFrame, s: int, tp_px, sl_px):
+        if w1.empty:
+            return None, None
+
+        tp_hit = None
+        sl_hit = None
+
+        if one_min_uses_highlow:
+            hi = w1["High"].astype(float)
+            lo = w1["Low"].astype(float)
+            if tp_px is not None:
+                tp_hit = (hi >= tp_px) if s == 1 else (lo <= tp_px)
+            if sl_px is not None:
+                sl_hit = (lo <= sl_px) if s == 1 else (hi >= sl_px)
+        else:
+            cl = w1["Close"].astype(float)
+            if tp_px is not None:
+                tp_hit = (cl >= tp_px) if s == 1 else (cl <= tp_px)
+            if sl_px is not None:
+                sl_hit = (cl <= sl_px) if s == 1 else (cl >= sl_px)
+
+        tp_any = bool(tp_hit.any()) if tp_hit is not None else False
+        sl_any = bool(sl_hit.any()) if sl_hit is not None else False
+
+        if not tp_any and not sl_any:
+            return None, None
+
+        t_tp = tp_hit.index[tp_hit][0] if tp_any else None
+        t_sl = sl_hit.index[sl_hit][0] if sl_any else None
+
+        if tp_any and not sl_any:
+            return "tp", t_tp
+        if sl_any and not tp_any:
+            return "sl", t_sl
+
+        # both
+        if t_tp < t_sl:
+            return "tp", t_tp
+        if t_sl < t_tp:
+            return "sl", t_sl
+
+        # same minute
+        return ("sl" if conservative_same_minute else "tp"), t_tp
+
+    # -----------------------
+    # Backtest loop
+    # -----------------------
     trades = []
-    trade_until_time = None
 
     # counters
     c_red = int(is_red.sum())
     c_signal = 0
     c_entered = 0
+
+    c_skip_pi = 0
+    c_skip_slope = 0
     c_skip_overlap = 0
     c_skip_no1m = 0
     c_skip_cross = 0
     c_skip_small = 0
-    c_tp1m = 0
+
+    c_exit_tp1m = 0
+    c_exit_sl1m = 0
+
+    trade_until_time = None
 
     i = 0
     while i < len(d15):
@@ -110,6 +254,30 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp1m(
 
         c_signal += 1
 
+        # --- filters at signal time (close 15m of bar i) ---
+        if use_pi_filter:
+            pi = float(d15.loc[i, pi_col])
+            if (not np.isfinite(pi)) or (pi > float(pi_max)):
+                c_skip_pi += 1
+                i += 1
+                continue
+
+        if use_slope_filter:
+            slope_pct = float(d15.loc[i, slope_col])
+            slope_bps = slope_pct * 10000.0
+            s_dir = int(side[i])
+            # short MR: skip if momentum up strong
+            if s_dir == -1 and slope_bps > float(slope_mom_bps):
+                c_skip_slope += 1
+                i += 1
+                continue
+            # long MR: skip if momentum down strong
+            if s_dir == 1 and slope_bps < -float(slope_mom_bps):
+                c_skip_slope += 1
+                i += 1
+                continue
+
+        # --- entry time ---
         signal_close_time = close15_time.iloc[i]
         entry_time = signal_close_time + pd.Timedelta(minutes=entry_delay_min)
 
@@ -152,96 +320,70 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp1m(
 
         c_entered += 1
 
-        if debug and (c_entered % max(1, int(debug_every)) == 0):
-            print(f"[DEBUG] Enter #{c_entered}: {'LONG' if s==1 else 'SHORT'} at {et} px={entry_px:.2f} entry_disloc={entry_disloc_bps:.1f}bps")
+        # 1m barrier prices (NET thresholds)
+        tp1_px, sl1_px = compute_tp_sl_prices(entry_px, s)
 
-        # set up monitoring horizon in 15m bars
+        # horizon in 15m bars
         entry_i = i
-        exit_reason = "time"
         exit_i = min(entry_i + max_hold_bars, len(d15) - 1)
+        exit_reason = "time"
 
-        # We'll walk forward bar by bar. For each bar j, before checking the 15m close,
-        # we scan 1m candles from the previous checkpoint to this bar's close+exit_delay
-        # for a TP_1m hit. If hit, exit immediately.
-
-        # Define the first scan window start = entry time (et)
         scan_start = et
-
-        # Pre-compute the TP1m price level (net of fees)
-        # Here, tp_1min_bps is interpreted as NET threshold. We exit at a price level
-        # that yields pnl_net == tp1_frac, so gross needs tp1_frac + fee_frac.
-        tp1_gross_frac = tp1_frac + fee_frac
-        if s == 1:
-            tp1_px = entry_px * (1.0 + tp1_gross_frac)
-        else:
-            tp1_px = entry_px * (1.0 - tp1_gross_frac)
-
-        hit_tp1m = False
+        hit_1m = False
         exit_time = None
         exit_px = None
 
+        # iterate bar-by-bar
         for j in range(entry_i + 1, exit_i + 1):
-            # time at which we execute exits for bar j (close+exit_delay)
             bar_close = close15_time.iloc[j]
             bar_exec_time = bar_close + pd.Timedelta(minutes=exit_delay_min)
 
-            # 1) scan intraminute TP between scan_start and bar_exec_time
-            w1 = d1.loc[scan_start:bar_exec_time]
-            if not w1.empty:
-                if tp1m_uses_highlow:
-                    if s == 1:
-                        tp_hit = (w1["High"].astype(float) >= tp1_px).any()
+            # --- scan 1m for TP/SL ---
+            if use_tp_1m or use_sl_1m:
+                w1 = d1.loc[scan_start:bar_exec_time]
+                hit_kind, t_hit = first_hit_time_1m(w1, s, tp1_px, sl1_px)
+                if hit_kind is not None:
+                    hit_1m = True
+                    exit_time = pd.Timestamp(t_hit)
+                    if hit_kind == "tp":
+                        exit_reason = "tp_1m"
+                        exit_px = tp1_px
+                        c_exit_tp1m += 1
                     else:
-                        tp_hit = (w1["Low"].astype(float) <= tp1_px).any()
-                else:
-                    if s == 1:
-                        tp_hit = (w1["Close"].astype(float) >= tp1_px).any()
-                    else:
-                        tp_hit = (w1["Close"].astype(float) <= tp1_px).any()
+                        exit_reason = "sl_1m"
+                        exit_px = sl1_px
+                        c_exit_sl1m += 1
 
-                if tp_hit:
-                    # exit immediately at tp1_px (standard)
-                    # pick first timestamp that hits
-                    if tp1m_uses_highlow:
-                        if s == 1:
-                            t_hit = w1.index[(w1["High"].astype(float) >= tp1_px)][0]
-                        else:
-                            t_hit = w1.index[(w1["Low"].astype(float) <= tp1_px)][0]
-                    else:
-                        if s == 1:
-                            t_hit = w1.index[(w1["Close"].astype(float) >= tp1_px)][0]
-                        else:
-                            t_hit = w1.index[(w1["Close"].astype(float) <= tp1_px)][0]
-
-                    exit_time = t_hit
-                    exit_px = tp1_px
-                    exit_reason = "tp_1m"
-                    hit_tp1m = True
-                    c_tp1m += 1
+                    # on associe l'exit_i au bar j (pour saut d'index comparable à la baseline)
+                    exit_i = j
                     break
 
-            # 2) if no tp1m: check discrete TP/SL at 15m close (decision), then execute at bar_exec_time
+            # --- 15m discrete check at close ---
             mark_px = float(d15.loc[j, "Close"])
             if s == 1:
                 pnl_mark = (mark_px / entry_px) - 1.0 - fee_frac
             else:
                 pnl_mark = (entry_px / mark_px) - 1.0 - fee_frac
 
-            if pnl_mark >= tp_frac:
+            if pnl_mark >= tp15_frac:
                 exit_reason = "tp"
                 exit_i = j
                 break
-            if pnl_mark <= -sl_frac:
+            if pnl_mark <= -sl15_frac:
                 exit_reason = "sl"
                 exit_i = j
                 break
 
-            # move scan window forward
             scan_start = bar_exec_time
 
-        # If tp_1m hit, we already have exit_time/exit_px
-        if not hit_tp1m:
-            # execute exit at close+exit_delay of exit_i
+        # Exit execution
+        if hit_1m:
+            # sortie au prix barrière
+            if exit_px is None or (not np.isfinite(float(exit_px))) or float(exit_px) <= 0:
+                # barrière invalide => fallback sur exit discret 15m
+                hit_1m = False
+
+        if not hit_1m:
             bar_close = close15_time.iloc[exit_i]
             exit_exec_time = bar_close + pd.Timedelta(minutes=exit_delay_min)
             xt = next_1m_open(exit_exec_time)
@@ -253,7 +395,7 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp1m(
 
         trade_until_time = pd.Timestamp(exit_time)
 
-        # realized pnl
+        # Realized PnL
         if s == 1:
             pnl_gross = (float(exit_px) / entry_px) - 1.0
         else:
@@ -267,19 +409,29 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp1m(
             "entry_time_1m": et,
             "exit_time_1m": pd.Timestamp(exit_time),
             "side": s,
-            "entry_px": entry_px,
+            "entry_px": float(entry_px),
             "exit_px": float(exit_px),
             "pct_diff": float(pct_diff[entry_i]),
             "entry_disloc_bps": float(entry_disloc_bps),
             "exit_reason": exit_reason,
-            "hold_bars_15m": int(exit_i - entry_i) if exit_reason != "tp_1m" else np.nan,
             "hold_minutes": float((pd.Timestamp(exit_time) - et).total_seconds() / 60.0),
             "pnl_gross": float(pnl_gross),
             "pnl_net": float(pnl_net),
             "win": win,
         })
 
-        if (not allow_overlap) and exit_reason != "tp_1m":
+        if debug and (c_entered % max(1, int(debug_every)) == 0):
+            extra = ""
+            if use_pi_filter:
+                extra += f" pi={float(d15.loc[entry_i, pi_col]):.2f}"
+            if use_slope_filter:
+                extra += f" slope_bps={float(d15.loc[entry_i, slope_col])*10000.0:+.2f}"
+            print(f"[DEBUG] Trade #{c_entered}: {'LONG' if s==1 else 'SHORT'} entry={et} exit={exit_time} reason={exit_reason}{extra}")
+            print(f"  entry_px={entry_px:.2f} exit_px={float(exit_px):.2f} entry_disloc={entry_disloc_bps:.1f}bps pct_diff={pct_diff[entry_i]*10000:.1f}bps")
+            print(f"  pnl_net={pnl_net*10000:.2f}bps")
+
+        # Advance index (baseline-like)
+        if not allow_overlap:
             i = exit_i + 1
         else:
             i += 1
@@ -288,11 +440,11 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp1m(
     if trades_df.empty:
         if debug:
             print("[DEBUG] No trades executed.")
-            print(f"  red_total={c_red}, signals={c_signal}, entered={c_entered}, tp1m_exits={c_tp1m}")
-            print(f"  skips: overlap={c_skip_overlap}, no1m={c_skip_no1m}, entry_cross={c_skip_cross}, entry_small={c_skip_small}")
+            print(f"  red_total={c_red}, signals={c_signal}, entered={c_entered}")
+            print(f"  skips: overlap={c_skip_overlap}, no1m={c_skip_no1m}, entry_cross={c_skip_cross}, entry_small={c_skip_small}, pi={c_skip_pi}, slope={c_skip_slope}")
         return trades_df, {"n_trades": 0, "msg": "Aucun trade exécuté."}
 
-    # summary
+    # Summary
     n = len(trades_df)
     win_rate = float(trades_df["win"].mean())
     avg_pnl = float(trades_df["pnl_net"].mean())
@@ -319,7 +471,8 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp1m(
         "max_drawdown": max_dd,
         "avg_hold_min": float(trades_df["hold_minutes"].mean()),
         "exit_reasons": trades_df["exit_reason"].value_counts().to_dict(),
-        "tp1m_count": int((trades_df["exit_reason"] == "tp_1m").sum()),
+        "tp1m_count": int(c_exit_tp1m),
+        "sl1m_count": int(c_exit_sl1m),
         "skip_stats": {
             "red_total": c_red,
             "signals": c_signal,
@@ -328,6 +481,8 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp1m(
             "skip_no1m": c_skip_no1m,
             "skip_entry_cross": c_skip_cross,
             "skip_entry_small": c_skip_small,
+            "skip_pi": c_skip_pi,
+            "skip_slope": c_skip_slope,
         }
     }
 
@@ -631,7 +786,7 @@ def main():
     trades, summary = backtest_redpoints_entry_1m_exit_15m_discrete(
         df15m, df1m,
         filtered_col="filtered_close",
-        red_threshold=0.0015,       # 20 bps
+        red_threshold=0.00035,       # 20 bps
         fee_roundtrip_bps=4,
         tp_bps=25,
         sl_bps=50,
@@ -641,19 +796,30 @@ def main():
         debug=True,
     )
 
-    trades, summary = backtest_redpoints_entry_1m_exit_15m_discrete_with_tp1m(
+
+    trades2, summary2 = backtest_redpoints_entry_1m_exit_15m_discrete_with_tp_sl_1m_and_filters(
         df15m, df1m,
         filtered_col="filtered_close",
-        red_threshold=0.00035,       # 20 bps
+        red_threshold=0.00035,
         fee_roundtrip_bps=4,
         tp_bps=15,
-        sl_bps=25,
+        sl_bps=15,
         max_hold_bars=8,
-        tp_1min_bps = 25.0,
         require_entry_dislocation=True,
-        min_entry_disloc_bps=15,    # optionnel
-        debug=True,
+        min_entry_disloc_bps=0.25,
+
+        use_tp_1m=True,
+        use_sl_1m=True,
+        use_pi_filter=True,
+        use_slope_filter=True,
+        slope_mom_bps = 1, 
+        pi_max = 4,
+        tp_1min_bps = 45.0,              # NET bps (actif si use_tp_1m)
+        sl_1min_bps = 25.0, 
+
+        debug=True
     )
+
 
 
 if __name__ == "__main__":
