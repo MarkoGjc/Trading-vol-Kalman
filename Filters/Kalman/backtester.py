@@ -1,6 +1,12 @@
 import numpy as np
 import pandas as pd
 
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
 def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp_sl_1m_and_filters(
     df15m: pd.DataFrame,
     df1m: pd.DataFrame,
@@ -30,7 +36,7 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp_sl_1m_and_filters(
     use_sl_1m: bool = True,
     tp_1min_bps: float = 15.0,              # NET bps (actif si use_tp_1m)
     sl_1min_bps: float = 30.0,              # NET bps (actif si use_sl_1m)
-    one_min_uses_highlow: bool = True,      # True: High/Low, False: Close
+    one_min_uses_highlow: bool = False,     # True: High/Low, False: Close
     conservative_same_minute: bool = True,  # si TP et SL touchent même minute -> SL
 
     # --- Filters (df15m columns) ---
@@ -48,6 +54,9 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp_sl_1m_and_filters(
     # --- Debug ---
     debug: bool = True,
     debug_every: int = 50,
+
+    # --- Plots ---
+    plot: bool = True,
 ):
     """
     Objectif:
@@ -264,6 +273,13 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp_sl_1m_and_filters(
 
         if use_slope_filter:
             slope_pct = float(d15.loc[i, slope_col])
+
+            # ✅ FIX: si slope non-fini (NaN/inf), on skip (sinon ça passe silencieusement)
+            if not np.isfinite(slope_pct):
+                c_skip_slope += 1
+                i += 1
+                continue
+
             slope_bps = slope_pct * 10000.0
             s_dir = int(side[i])
             # short MR: skip if momentum up strong
@@ -281,15 +297,16 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp_sl_1m_and_filters(
         signal_close_time = close15_time.iloc[i]
         entry_time = signal_close_time + pd.Timedelta(minutes=entry_delay_min)
 
-        if (not allow_overlap) and (trade_until_time is not None) and (entry_time <= trade_until_time):
-            c_skip_overlap += 1
-            i += 1
-            continue
-
         et = next_1m_open(entry_time)
         if et is None:
             c_skip_no1m += 1
             break
+
+        # ✅ FIX: overlap check sur le temps d'exécution réel (et), pas sur entry_time
+        if (not allow_overlap) and (trade_until_time is not None) and (et <= trade_until_time):
+            c_skip_overlap += 1
+            i += 1
+            continue
 
         entry_px = float(d1.loc[et, "Open"])
         if not np.isfinite(entry_px) or entry_px <= 0:
@@ -340,7 +357,10 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp_sl_1m_and_filters(
 
             # --- scan 1m for TP/SL ---
             if use_tp_1m or use_sl_1m:
-                w1 = d1.loc[scan_start:bar_exec_time]
+                # ✅ FIX: fenêtre [scan_start, bar_exec_time) (borne droite exclusive)
+                # évite lookahead (minute qui ouvre à bar_exec_time) + évite double comptage
+                w1 = d1[(d1.index >= scan_start) & (d1.index < bar_exec_time)]
+
                 hit_kind, t_hit = first_hit_time_1m(w1, s, tp1_px, sl1_px)
                 if hit_kind is not None:
                     hit_1m = True
@@ -430,9 +450,13 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp_sl_1m_and_filters(
             print(f"  entry_px={entry_px:.2f} exit_px={float(exit_px):.2f} entry_disloc={entry_disloc_bps:.1f}bps pct_diff={pct_diff[entry_i]*10000:.1f}bps")
             print(f"  pnl_net={pnl_net*10000:.2f}bps")
 
-        # Advance index (baseline-like)
+        # Advance index
+        # ✅ FIX (A): si sortie 1m, on ne skip pas la bougie exit_i.
         if not allow_overlap:
-            i = exit_i + 1
+            if exit_reason in ("tp_1m", "sl_1m"):
+                i = exit_i
+            else:
+                i = exit_i + 1
         else:
             i += 1
 
@@ -490,7 +514,79 @@ def backtest_redpoints_entry_1m_exit_15m_discrete_with_tp_sl_1m_and_filters(
         print("[DEBUG] Summary")
         print(summary)
 
+    # -----------------------
+    # PLOTS (2 graphs)
+    # -----------------------
+    if plot:
+        # 1) Rendement (equity / cumulative return) en fonction du temps (minutes)
+        t0 = pd.to_datetime(trades_df["entry_time_1m"].min())
+        t1 = pd.to_datetime(trades_df["exit_time_1m"].max())
+        if pd.isna(t0) or pd.isna(t1) or t1 <= t0:
+            # fallback: plot par trade (minutes = index)
+            x_min = np.arange(len(trades_df), dtype=float)
+            y_eq = trades_df["equity"].values
+        else:
+            minute_index = pd.date_range(t0.floor("min"), t1.ceil("min"), freq="min")
+            eq_series = pd.Series(1.0, index=minute_index)
+
+            # equity est défini à chaque sortie; on la pose puis forward-fill
+            tmp = trades_df.sort_values("exit_time_1m")[["exit_time_1m", "equity"]].copy()
+            tmp["exit_time_1m"] = pd.to_datetime(tmp["exit_time_1m"]).dt.floor("min")
+            tmp = tmp.groupby("exit_time_1m", as_index=True)["equity"].last()
+            eq_series.loc[eq_series.index.intersection(tmp.index)] = tmp.loc[eq_series.index.intersection(tmp.index)].values
+            eq_series = eq_series.ffill()
+
+            x_min = (eq_series.index - eq_series.index[0]).total_seconds() / 60.0
+            y_eq = eq_series.values
+
+        plt.figure()
+        plt.plot(x_min, y_eq)
+        plt.axhline(1.0, linestyle="--")
+        plt.grid(True, alpha=0.3)
+        plt.xlabel("Temps (minutes depuis début du backtest)")
+        plt.ylabel("Equity (capital, base=1)")
+        plt.title("Rendement cumulé (equity) en fonction du temps (minutes)")
+        plt.show()
+
+        # 2) Prix + prix filtré + markers buy/sell
+        plt.figure()
+        plt.plot(close15_time, close15, label="Prix (Close 15m)")
+        plt.plot(close15_time, filt15, label=f"Prix filtré ({filtered_col})")
+
+        # Marqueurs: vert = BUY, rouge = SELL (entrées + sorties)
+        buys_x, buys_y = [], []
+        sells_x, sells_y = [], []
+
+        for _, tr in trades_df.iterrows():
+            etr = pd.Timestamp(tr["entry_time_1m"])
+            xtr = pd.Timestamp(tr["exit_time_1m"])
+            entry_px = float(tr["entry_px"])
+            exit_px = float(tr["exit_px"])
+            s = int(tr["side"])
+
+            if s == 1:
+                # long: BUY à l'entrée, SELL à la sortie
+                buys_x.append(etr);  buys_y.append(entry_px)
+                sells_x.append(xtr); sells_y.append(exit_px)
+            else:
+                # short: SELL à l'entrée, BUY à la sortie
+                sells_x.append(etr); sells_y.append(entry_px)
+                buys_x.append(xtr);  buys_y.append(exit_px)
+
+        if len(buys_x) > 0:
+            plt.scatter(buys_x, buys_y, color="green", s=35, label="BUY")
+        if len(sells_x) > 0:
+            plt.scatter(sells_x, sells_y, color="red", s=35, label="SELL")
+
+        plt.grid(True, alpha=0.3)
+        plt.xlabel("Temps")
+        plt.ylabel("Prix")
+        plt.title("Prix vs Prix filtré + points BUY/SELL")
+        plt.legend()
+        plt.show()
+
     return trades_df, summary
+
 
 def backtest_redpoints_entry_1m_exit_15m_discrete(
     df15m: pd.DataFrame,
@@ -805,13 +901,13 @@ def main():
         tp_bps=15,
         sl_bps=15,
         max_hold_bars=8,
-        require_entry_dislocation=True,
+        require_entry_dislocation=False,
         min_entry_disloc_bps=0.25,
 
-        use_tp_1m=True,
-        use_sl_1m=True,
-        use_pi_filter=True,
-        use_slope_filter=True,
+        use_tp_1m=False,
+        use_sl_1m=False,
+        use_pi_filter=False,
+        use_slope_filter=False,
         slope_mom_bps = 1, 
         pi_max = 4,
         tp_1min_bps = 45.0,              # NET bps (actif si use_tp_1m)
